@@ -3,64 +3,101 @@ import random
 import time
 from datetime import datetime
 from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 # --------------------
 # Configuration
 # --------------------
+# Use localhost:29092 for connection from your host machine to Docker
 KAFKA_BROKER = "localhost:29092"
 TOPIC = "football-events"
 
-# Mock Data
-TEAMS = ["Red Dragons", "Blue Titans"]
-EVENT_TYPES = ["PASS", "SHOT", "FOUL", "CORNER", "GOAL", "YELLOW_CARD"]
+# Mock Match Data
+MATCH_ID = "PL-2024-001"
+TEAM_A = "Arsenal"
+TEAM_B = "Manchester City"
 PLAYERS = {
-    "Red Dragons": ["D. Smith", "J. Doe", "A. Brown", "M. Wilson"],
-    "Blue Titans": ["L. Messi", "C. Ronaldo", "K. Mbappe", "N. Neymar"]
+    TEAM_A: ["Saka", "Odegaard", "Rice", "Havertz", "Saliba"],
+    TEAM_B: ["Haaland", "De Bruyne", "Foden", "Rodri", "Bernardo"]
 }
 
-def json_serializer(data):
-    return json.dumps(data).encode("utf-8")
+# Event distribution: 70% Pass, 10% Shot, 10% Foul, 5% Goal, 5% Card
+EVENT_TYPES = ["PASS", "SHOT", "FOUL", "GOAL", "CARD"]
+EVENT_WEIGHTS = [0.70, 0.10, 0.10, 0.05, 0.05]
 
-# Initialize Producer
-producer = KafkaProducer(
-    bootstrap_servers=[KAFKA_BROKER],
-    value_serializer=json_serializer
-)
-
-print(f"Starting producer on topic: {TOPIC}...")
+def get_producer():
+    """Initializes the Kafka Producer with reliability settings."""
+    try:
+        return KafkaProducer(
+            bootstrap_servers=[KAFKA_BROKER],
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            # acks=1 ensures the broker receives the message before moving on
+            acks=1,
+            # Retries in case of transient network issues
+            retries=5
+        )
+    except KafkaError as e:
+        print(f"Failed to create producer: {e}")
+        return None
 
 def generate_event():
-    team = random.choice(TEAMS)
+    """Generates a random football match event."""
+    team = random.choice([TEAM_A, TEAM_B])
     player = random.choice(PLAYERS[team])
-    # Weighting events so 'PASS' happens more often than 'GOAL'
-    event_type = random.choices(
-        EVENT_TYPES, 
-        weights=[60, 15, 10, 8, 2, 5], 
-        k=1
-    )[0]
+    event_type = random.choices(EVENT_TYPES, weights=EVENT_WEIGHTS)[0]
     
-    return {
-        "timestamp": datetime.now().isoformat(),
+    event = {
+        "event_id": f"evt_{int(time.time() * 1000)}",
+        "match_id": MATCH_ID,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "team": team,
         "player": player,
         "event_type": event_type,
-        "match_id": "MATCH_2025_001",
         "location": {
-            "x": random.randint(0, 100),
-            "y": random.randint(0, 100)
-        }
+            "x": round(random.uniform(0, 100), 2),
+            "y": round(random.uniform(0, 100), 2)
+        },
+        "details": "N/A"
     }
-
-try:
-    while True:
-        event = generate_event()
-        producer.send(TOPIC, event)
-        print(f"Sent: {event['team']} - {event['player']}: {event['event_type']}")
+    
+    # Logic for specific events
+    if event_type == "CARD":
+        event["details"] = random.choice(["Yellow", "Red"])
+    elif event_type == "SHOT":
+        event["details"] = random.choice(["On Target", "Off Target", "Blocked"])
         
-        # Sleep for a random interval to simulate real-game rhythm
-        time.sleep(random.uniform(0.5, 3.0))
-except KeyboardInterrupt:
-    print("Producer stopped.")
-finally:
-    producer.flush()
-    producer.close()
+    return event
+
+if __name__ == "__main__":
+    producer = get_producer()
+    
+    if producer:
+        print(f"--- Connection Established ---")
+        print(f"Starting Live Stream: {TEAM_A} vs {TEAM_B}...")
+        print(f"Viewing on: http://localhost:8085 (Kafka UI)")
+        print("-" * 40)
+        
+        try:
+            while True:
+                data = generate_event()
+                
+                # Send data to Kafka
+                producer.send(TOPIC, data)
+                
+                # Force the message to be sent immediately rather than waiting for a batch
+                producer.flush()
+                
+                print(f"[{data['timestamp']}] {data['team']} | {data['player']} | {data['event_type']}")
+                
+                # Simulate match speed
+                time.sleep(random.uniform(1, 3))
+                
+        except KeyboardInterrupt:
+            print("\nMatch Ended by User.")
+        except Exception as e:
+            print(f"\nError during streaming: {e}")
+        finally:
+            producer.close()
+            print("Producer connection closed.")
+    else:
+        print("Could not start producer. Ensure your Docker containers are running.")
