@@ -1,0 +1,99 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - streaming-net
+
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - streaming-net
+
+  # --------------------
+  # Kafka UI
+  # --------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: football-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    networks:
+      - streaming-net
+
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    user: root
+    environment:
+      - SPARK_MODE=master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark:/opt/spark/work-dir
+    # This command ensures the process stays running
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    networks:
+      - streaming-net
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    user: root
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    depends_on:
+      - spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    networks:
+      - streaming-net
+  # --------------------
+  # PostgreSQL
+  # --------------------
+  postgres:
+    image: postgres:15.5
+    container_name: postgres
+    environment:
+      POSTGRES_DB: football
+      POSTGRES_USER: football_user
+      POSTGRES_PASSWORD: football_pass
+    ports:
+      - "5433:5432"  # This maps your computer's 5433 to Docker's 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - streaming-net
+
+networks:
+  streaming-net:
+    driver: bridge
+
+volumes:
+  pgdata:
