@@ -1,8 +1,9 @@
+import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col
-from pyspark.sql.types import StructType, StructField, StringType, FloatType, DoubleType
+from pyspark.sql.functions import from_json, col, to_timestamp
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 
-# Define schema to match your Python Producer exactly
+# --- 1. Schema Definition ---
 schema = StructType([
     StructField("event_id", StringType(), True),
     StructField("match_id", StringType(), True),
@@ -17,28 +18,31 @@ schema = StructType([
     ]), True)
 ])
 
-# Initialize Spark Session with Kafka and Postgres JARs
-# Note: In production, these JARs must be available to the Spark cluster
+# --- 2. Smart Spark Session ---
+# This looks for the Master, but defaults to local if the cluster is unreachable
 spark = SparkSession.builder \
     .appName("Football_Streaming_Processor") \
+    .config("spark.sql.streaming.checkpointLocation", "/tmp/spark-checkpoints") \
     .getOrCreate()
 
-spark.sparkContext.setLogLevel("WARN")
+# Reduce logging noise so you can see your data
+spark.sparkContext.setLogLevel("ERROR")
 
-# 1. Read from Kafka (INTERNAL network)
+# --- 3. Kafka Ingestion ---
 df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "kafka:9092") \
     .option("subscribe", "football-events") \
     .option("startingOffsets", "earliest") \
+    .option("failOnDataLoss", "false") \
     .load()
 
-# 2. Extract and Flatten the JSON
+# --- 4. Transformation ---
 parsed_df = df.selectExpr("CAST(value AS STRING)") \
     .select(from_json(col("value"), schema).alias("data")) \
     .select(
         col("data.event_id"),
-        col("data.timestamp"),
+        to_timestamp(col("data.timestamp"), "yyyy-MM-dd HH:mm:ss").alias("timestamp"),
         col("data.team"),
         col("data.player"),
         col("data.event_type"),
@@ -47,26 +51,37 @@ parsed_df = df.selectExpr("CAST(value AS STRING)") \
         col("data.location.y").alias("loc_y")
     )
 
-# 3. Write to Postgres
+# --- 5. Postgres Sink Logic ---
 def write_to_postgres(batch_df, batch_id):
     if batch_df.count() > 0:
-        print(f"--- Batch {batch_id} ---")
-        print(f"Processing {batch_df.count()} events...")
-        batch_df.show(5) # Preview in logs
+        batch_df.persist()
         
-        batch_df.write \
-            .format("jdbc") \
-            .option("url", "jdbc:postgresql://postgres:5432/football") \
-            .option("dbtable", "football_events") \
-            .option("user", "football_user") \
-            .option("password", "football_pass") \
-            .option("driver", "org.postgresql.Driver") \
-            .mode("append") \
-            .save()
+        # Show data in console for immediate feedback
+        print(f"DEBUG: Batch {batch_id} received. Writing {batch_df.count()} rows to Postgres.")
+        batch_df.show(5) 
+        
+        try:
+            batch_df.write \
+                .format("jdbc") \
+                .option("url", "jdbc:postgresql://postgres:5432/football") \
+                .option("dbtable", "football_events") \
+                .option("user", "football_user") \
+                .option("password", "football_pass") \
+                .option("driver", "org.postgresql.Driver") \
+                .mode("append") \
+                .save()
+            print("Successfully saved to Postgres.")
+        except Exception as e:
+            print(f"Postgres Write Error: {e}")
+            
+        batch_df.unpersist()
+    else:
+        print(f"Batch {batch_id} is empty. Waiting for football events...")
 
-# Start the Stream
+# --- 6. Execution ---
 query = parsed_df.writeStream \
     .foreachBatch(write_to_postgres) \
+    .trigger(processingTime='5 seconds') \
     .start()
 
 query.awaitTermination()
