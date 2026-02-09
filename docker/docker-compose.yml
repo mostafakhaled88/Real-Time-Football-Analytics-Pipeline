@@ -1,5 +1,7 @@
+version: "3.8"
+
 services:
-  # --- INGESTION: KAFKA & ZOOKEEPER ---
+  # ---------- ZOOKEEPER ----------
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
@@ -8,6 +10,7 @@ services:
     networks:
       - football-net
 
+  # ---------- KAFKA ----------
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: kafka
@@ -25,6 +28,7 @@ services:
     networks:
       - football-net
 
+  # ---------- KAFKA UI ----------
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -38,7 +42,7 @@ services:
     networks:
       - football-net
 
-  # --- STORAGE: POSTGRES ---
+  # ---------- POSTGRES ----------
   postgres:
     image: postgres:15
     container_name: postgres
@@ -53,7 +57,7 @@ services:
     networks:
       - football-net
 
-  # --- PROCESSING: SPARK CLUSTER ---
+  # ---------- SPARK MASTER ----------
   spark-master:
     image: apache/spark:3.5.0
     container_name: spark-master
@@ -61,46 +65,49 @@ services:
       /opt/spark/bin/spark-class
       org.apache.spark.deploy.master.Master
     ports:
-      - "8080:8080"
+      - "8088:8088"
       - "7077:7077"
     networks:
       - football-net
 
-
+  # ---------- SPARK WORKER ----------
   spark-worker:
-      image: apache/spark:3.5.0
-      container_name: spark-worker
-      depends_on:
-        - spark-master
-      command: >
-        /opt/spark/bin/spark-class
-        org.apache.spark.deploy.worker.Worker
-        spark://spark-master:7077
-      environment:
-        - SPARK_WORKER_MEMORY=1G
-        - SPARK_WORKER_CORES=1
-      networks:
-        - football-net
-
-
-  spark-submit:
     image: apache/spark:3.5.0
-    container_name: spark-submit
-    user: root  # Added to ensure it can write to /tmp and access volumes
+    container_name: spark-worker
     depends_on:
       - spark-master
-    volumes:
-      - ./spark:/opt/spark/work-dir
-    # Increased sleep to 20s to ensure Master is fully initialized
-    entrypoint: >
-        /bin/bash -c "sleep 20 &&
-        /opt/spark/bin/spark-submit
-        --master spark://spark-master:7077
-        --conf 'spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp -Divy.home=/tmp'
-        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1
-        /opt/spark/work-dir/spark_processor.py"
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+    environment:
+      SPARK_WORKER_MEMORY: 1G
+      SPARK_WORKER_CORES: 1
     networks:
       - football-net
+
+  # ---------- SPARK SUBMIT ----------
+  spark-submit:
+    build: .
+    image: football-spark:3.5
+    container_name: spark-submit
+    depends_on:
+      - spark-master
+      - kafka
+      - postgres
+    volumes:
+      - ./spark:/opt/spark/work-dir
+    restart: unless-stopped
+    entrypoint: >
+      /bin/bash -c "sleep 20 &&
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --conf spark.driver.extraJavaOptions='-Divy.cache.dir=/tmp -Divy.home=/tmp'
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1
+      /opt/spark/work-dir/spark_processor.py"
+    networks:
+      - football-net
+
 
 networks:
   football-net:
